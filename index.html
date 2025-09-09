@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Simulador – Robô terrestre entre talhões</title>
+  <meta name="theme-color" content="#0b1020">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icons/icon-192.png">
+  <style>
+    html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#0b1020; color:#e9f1ff; }
+    header { padding: 12px 16px; display:flex; align-items:center; gap:12px; position: sticky; top:0; background:rgba(11,16,32,.9); backdrop-filter: blur(6px); border-bottom:1px solid #1e2a4a; z-index: 10; }
+    h1 { font-size: 18px; margin:0; font-weight:600; letter-spacing:.2px; }
+    #controls { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    label { font-size: 12px; opacity:.9 }
+    input[type="range"] { width:120px }
+    button, select { background:#101a38; color:#e9f1ff; border:1px solid #2a3b6a; border-radius:12px; padding:8px 12px; font-size: 13px; cursor:pointer }
+    button:hover { background:#14224a }
+    .pill { padding:6px 10px; border-radius:999px; background:#0d172f; border:1px solid #263a6a; font-size:12px }
+    #wrap { display:grid; grid-template-columns: 320px 1fr; height: calc(100% - 58px); }
+    #sidebar { border-right:1px solid #1e2a4a; padding:12px; overflow:auto }
+    #canvasWrap { position: relative; height:100%; }
+    #sim { display:block; width:100%; height:100%; background:linear-gradient(180deg,#0b1020,#0c1328) }
+    .hud { position:absolute; left:12px; bottom:12px; z-index:5; display:flex; gap:6px; flex-wrap:wrap }
+    .legend { font-size:12px; opacity:.85 }
+    .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background:#0a1636; border:1px solid #254078; padding:2px 6px; border-radius:6px }
+    ul { margin:6px 0 0 16px; padding:0 }
+    .row { display:flex; gap:6px; align-items:center; }
+    .tip { font-size:12px; opacity:.8; margin-top:8px }
+    @media (max-width: 920px) {
+      #wrap { grid-template-columns: 1fr; }
+      #sidebar { border-right: none; border-top:1px solid #1e2a4a; order: 2; }
+      #canvasWrap { order: 1; height: 55vh; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Robô terrestre • Desvio de cultivos • Simulador Web</h1>
+    <div id="controls">
+      <div class="row"><label>Vel. máx</label><input id="vel" type="range" min="40" max="140" step="1" value="90"> <span class="pill" id="velVal">90</span></div>
+      <div class="row"><label>Raios LiDAR</label><input id="rays" type="range" min="16" max="128" step="8" value="64"> <span class="pill" id="raysVal">64</span></div>
+      <div class="row"><label>Ruído</label><input id="noise" type="range" min="0" max="12" step="1" value="2"> <span class="pill" id="noiseVal">2%</span></div>
+      <select id="layout">
+        <option value="linhas">Linhas (talhões)</option>
+        <option value="grade">Grade</option>
+        <option value="aleatorio">Obstáculos aleatórios</option>
+      </select>
+      <button id="reset">Reset</button>
+      <button id="pwa">Instalar (PWA)</button>
+    </div>
+  </header>
+  <div id="wrap">
+    <aside id="sidebar">
+      <p><strong>Como usar</strong></p>
+      <ul>
+        <li><span class="kbd">Clique</span> no mapa para definir o <em>goal</em>.</li>
+        <li><span class="kbd">WASD</span> ou setas para teleoperação manual.</li>
+        <li><span class="kbd">Espaço</span> pausa/continua.</li>
+      </ul>
+      <p class="tip">Cada aluno abre este link e ganha sua própria instância local (sem servidor). Para turma sincronizada, crie "salas" com um <em>room</em> na URL (?room=TurmaA) – o estado continua local, mas você consegue separar métricas por turma ao exportar.</p>
+      <p><strong>Objetivo pedagógico</strong></p>
+      <ul>
+        <li>Sensoriamento (LiDAR 2D simulado com raios).</li>
+        <li>Planejamento reativo (VFH simplificado) + <em>go-to-goal</em>.</li>
+        <li>Modelagem de talhões (linhas) e colisões.</li>
+      </ul>
+      <p><strong>Exportar dados</strong></p>
+      <button id="exportCSV">Baixar telemetria CSV</button>
+      <p class="tip">CSV inclui: t, x, y, theta, v, w, dist_goal, colisões.</p>
+    </aside>
+    <main id="canvasWrap">
+      <canvas id="sim"></canvas>
+      <div class="hud legend">
+        <span class="pill">Robô = círculo</span>
+        <span class="pill">LiDAR = raios</span>
+        <span class="pill">Obstáculos = verde</span>
+        <span class="pill">Goal = cruz</span>
+      </div>
+    </main>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('sim');
+  const ctx = canvas.getContext('2d');
+  let W, H; const DPR = Math.min(2, window.devicePixelRatio || 1);
+  function resize(){ W = canvas.clientWidth = document.getElementById('canvasWrap').clientWidth; H = canvas.clientHeight = document.getElementById('canvasWrap').clientHeight; canvas.width = W * DPR; canvas.height = H * DPR; ctx.setTransform(DPR,0,0,DPR,0,0);}  
+  window.addEventListener('resize', resize); resize();
+
+  const velSlider = document.getElementById('vel');
+  const raysSlider = document.getElementById('rays');
+  const noiseSlider = document.getElementById('noise');
+  const velVal = document.getElementById('velVal');
+  const raysVal = document.getElementById('raysVal');
+  const noiseVal = document.getElementById('noiseVal');
+  const layoutSel = document.getElementById('layout');
+
+  velSlider.oninput = () => velVal.textContent = (+velSlider.value).toFixed(0);
+  raysSlider.oninput = () => raysVal.textContent = (+raysSlider.value).toFixed(0);
+  noiseSlider.oninput = () => noiseVal.textContent = (+(noiseSlider.value)).toFixed(0)+"%";
+
+  const world = { obstacles: [], goal: {x: 0, y: 0}, paused:false, t0: performance.now(), logs:[] };
+  function centerGoal(){ world.goal.x = Math.max(120, W*0.8); world.goal.y = Math.max(80, H*0.5); }
+  centerGoal();
+
+  function lineObstacles(rows=8, gap=36, thickness=10){
+    const arr=[]; const margin=60; const startX=margin, endX=W-margin; const usableH = H - margin*2;
+    for(let i=0;i<rows;i++){
+      const y = margin + i*(usableH/(rows-1));
+      if(i%3===2) continue;
+      arr.push({x:startX, y:y-thickness/2, w:endX-startX, h:thickness});
+    }
+    return arr;
+  }
+  function gridObstacles(cols=7, rows=5, size=40){
+    const arr=[]; const margin=80; const usableW = W - margin*2; const usableH = H - margin*2;
+    for(let i=0;i<cols;i++){
+      for(let j=0;j<rows;j++){
+        if((i+j)%2===0) continue;
+        const x = margin + i*(usableW/(cols-1)) - size/2;
+        const y = margin + j*(usableH/(rows-1)) - size/2;
+        arr.push({x, y, w:size, h:size});
+      }
+    }
+    return arr;
+  }
+  function randomObstacles(n=32){
+    const arr=[]; const margin=80;
+    for(let i=0;i<n;i++){
+      const w= 30+Math.random()*70, h= 20+Math.random()*60;
+      const x= margin + Math.random()*(W-2*margin-w);
+      const y= margin + Math.random()*(H-2*margin-h);
+      arr.push({x,y,w,h});
+    }
+    return arr;
+  }
+
+  function setLayout(k){
+    if(k==='linhas') world.obstacles = lineObstacles();
+    else if(k==='grade') world.obstacles = gridObstacles();
+    else world.obstacles = randomObstacles();
+  }
+  setLayout('linhas');
+
+  const robot = { x: Math.max(80, W*0.2), y: Math.max(60, H*0.5), th: 0, v:0, w:0, r: 14, vmax: +velSlider.value/100, umax: 2.4, lidarMax: 180 };
+
+  function clamp(v,a,b){ return Math.max(a, Math.min(b,v)); }
+  function dist(a,b){ const dx=a.x-b.x, dy=a.y-b.y; return Math.hypot(dx,dy);} 
+  function segmentIntersect(x1,y1,x2,y2, x3,y3,x4,y4){
+    const d = (x1-x2)*(y3-y4) - (y1-y2)*(x3-x4);
+    if(d===0) return false;
+    const t = ((x1-x3)*(y3-y4) - (y1-y3)*(x3-x4))/d;
+    const u = -((x1-x2)*(y1-y3) - (y1-y2)*(x1-x3))/d;
+    return t>=0 && t<=1 && u>=0 && u<=1;
+  }
+  function collideCircleRect(cx,cy,r, {x,y,w,h}){
+    const nx = clamp(cx, x, x+w), ny = clamp(cy, y, y+h); return Math.hypot(cx-nx, cy-ny) < r; }
+
+  function sense(){
+    const beams = +raysSlider.value; const maxR = robot.lidarMax; const readings = [];
+    for(let i=0;i<beams;i++){
+      const ang = robot.th - Math.PI + i*(2*Math.PI/(beams-1));
+      let best = maxR; const steps= maxR; const nx = Math.cos(ang), ny = Math.sin(ang);
+      for(let s=1;s<=steps;s+=2){
+        const px = robot.x + nx*s, py = robot.y + ny*s;
+        let hit=false;
+        for(const ob of world.obstacles){ if(px>=ob.x && px<=ob.x+ob.w && py>=ob.y && py<=ob.y+ob.h){ hit=true; break; } }
+        if(hit){ best = s; break; }
+      }
+      const noiseP = (+noiseSlider.value)/100; best += (Math.random()*2-1)*maxR*noiseP*0.1;
+      readings.push({ang, d: clamp(best, 2, maxR)});
+    }
+    return readings;
+  }
+
+  function control(dt){
+    const readings = sense();
+    const gdx = world.goal.x - robot.x, gdy = world.goal.y - robot.y;
+    const goalAng = Math.atan2(gdy, gdx);
+    const headingErr = Math.atan2(Math.sin(goalAng-robot.th), Math.cos(goalAng-robot.th));
+
+    let repelX=0, repelY=0; const safe = 38;
+    for(const r of readings){
+      const w = (1/Math.max(6, r.d - safe));
+      repelX += -Math.cos(r.ang)*w; repelY += -Math.sin(r.ang)*w;
+    }
+    const repelAng = Math.atan2(repelY, repelX);
+    const blend = 0.55;
+    const targetAng = Math.atan2( (1-blend)*Math.sin(goalAng) + blend*Math.sin(repelAng), (1-blend)*Math.cos(goalAng) + blend*Math.cos(repelAng) );
+    const err = Math.atan2(Math.sin(targetAng-robot.th), Math.cos(targetAng-robot.th));
+
+    const wCmd = clamp(3.2*err, -2.6, 2.6);
+    const vCmd = robot.vmax * (1 - 0.8*Math.exp(-Math.abs(headingErr))) * speedLimiter(readings);
+
+    robot.w += clamp(wCmd - robot.w, -robot.umax*dt, robot.umax*dt);
+    robot.v += clamp(vCmd - robot.v, -robot.umax*dt, robot.umax*dt);
+    robot.th += robot.w * dt; robot.x += Math.cos(robot.th)*robot.v; robot.y += Math.sin(robot.th)*robot.v;
+
+    let collided=false; for(const ob of world.obstacles){ if(collideCircleRect(robot.x,robot.y,robot.r,ob)){ collided=true;
+        const push = 2; robot.x -= Math.cos(robot.th)*push; robot.y -= Math.sin(robot.th)*push; robot.v *= 0.2; }
+    }
+
+    world.logs.push({t: (performance.now()-world.t0)/1000, x:robot.x, y:robot.y, th:robot.th, v:robot.v, w:robot.w, dg: dist(robot, world.goal), col: collided?1:0});
+  }
+  function speedLimiter(readings){
+    const ahead = readings[Math.floor(readings.length/2)].d; return clamp((ahead-20)/100, 0.05, 1);
+  }
+
+  const keys = new Set();
+  window.addEventListener('keydown', e=>{ if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','w','a','s','d',' '].includes(e.key)) e.preventDefault(); keys.add(e.key); if(e.key===' ') world.paused = !world.paused; });
+  window.addEventListener('keyup', e=>{ keys.delete(e.key); });
+  function teleop(dt){
+    const K=0.015; let lv=0, lw=0;
+    if(keys.has('w')||keys.has('ArrowUp')) lv += 1;
+    if(keys.has('s')||keys.has('ArrowDown')) lv -= 1;
+    if(keys.has('a')||keys.has('ArrowLeft')) lw -= 1;
+    if(keys.has('d')||keys.has('ArrowRight')) lw += 1;
+    if(lv||lw){ robot.v += clamp(lv*robot.vmax - robot.v, -robot.umax*dt, robot.umax*dt); robot.w += clamp(lw*2.4 - robot.w, -robot.umax*dt, robot.umax*dt); }
+  }
+
+  canvas.addEventListener('pointerdown', e=>{ const r=canvas.getBoundingClientRect(); world.goal.x = (e.clientX - r.left); world.goal.y = (e.clientY - r.top); });
+
+  function draw(){ ctx.clearRect(0,0,W,H);
+    ctx.fillStyle = '#0f5a2a'; world.obstacles.forEach(o=>{ ctx.fillRect(o.x, o.y, o.w, o.h); });
+    ctx.strokeStyle = '#f0d24d'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(world.goal.x-8, world.goal.y); ctx.lineTo(world.goal.x+8, world.goal.y); ctx.moveTo(world.goal.x, world.goal.y-8); ctx.lineTo(world.goal.x, world.goal.y+8); ctx.stroke();
+    const readings = sense(); ctx.globalAlpha = .6; ctx.strokeStyle = '#69a5ff'; ctx.lineWidth=1; ctx.beginPath();
+    for(const r of readings){ const px = robot.x + Math.cos(r.ang)*r.d, py = robot.y + Math.sin(r.ang)*r.d; ctx.moveTo(robot.x, robot.y); ctx.lineTo(px, py); }
+    ctx.stroke(); ctx.globalAlpha=1;
+    ctx.fillStyle = '#8ac6ff'; ctx.beginPath(); ctx.arc(robot.x, robot.y, robot.r, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#c7e0ff'; ctx.beginPath(); ctx.moveTo(robot.x, robot.y); ctx.lineTo(robot.x + Math.cos(robot.th)*robot.r*1.2, robot.y + Math.sin(robot.th)*robot.r*1.2); ctx.stroke();
+  }
+
+  let last = performance.now();
+  function loop(){ const now = performance.now(); const dt = Math.min(0.033, (now-last)/1000); last = now; if(!world.paused){ teleop(dt); control(dt); } draw(); requestAnimationFrame(loop); }
+  loop();
+
+  document.getElementById('reset').onclick = ()=>{ robot.x=Math.max(80, W*0.2); robot.y=Math.max(60, H*0.5); robot.th=0; robot.v=robot.w=0; setLayout(layoutSel.value); world.logs.length=0; world.t0=performance.now(); centerGoal(); };
+  layoutSel.onchange = ()=>{ setLayout(layoutSel.value); };
+  document.getElementById('exportCSV').onclick = ()=>{
+    let csv = 't,x,y,theta,v,w,dist_goal,collision\n';
+    for(const r of world.logs){ csv += `${r.t.toFixed(3)},${r.x.toFixed(2)},${r.y.toFixed(2)},${r.th.toFixed(4)},${r.v.toFixed(3)},${r.w.toFixed(3)},${r.dg.toFixed(2)},${r.col}\n`; }
+    const blob = new Blob([csv], {type:'text/csv'}); const url = URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='telemetria.csv'; a.click(); URL.revokeObjectURL(url);
+  };
+
+  // PWA: register Service Worker
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js').catch(console.error);
+    });
+  }
+
+  // Minimal PWA install (deferred prompt)
+  let deferredPrompt=null; window.addEventListener('beforeinstallprompt', (e)=>{ e.preventDefault(); deferredPrompt=e; });
+  document.getElementById('pwa').onclick = async ()=>{ if(deferredPrompt){ deferredPrompt.prompt(); } else { alert('Instalação disponível quando servido via HTTPS (GitHub Pages/Netlify).'); } };
+})();
+</script>
+</body>
+</html>
